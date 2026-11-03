@@ -1,0 +1,5 @@
+# Веб-интерфейс GigaAM: только те же зависимости, что и в extra "api"
+# pyproject.toml основного проекта — никаких новых библиотек.
+fastapi==0.111.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9

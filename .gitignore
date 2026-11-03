@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Виртуальные окружения
+.venv/
+venv/
+
+# Секреты и локальные конфиги
+.env
+.env.*
+
+# IDE / редакторы
+.vscode/
+.idea/
+.continue/
+
+# Кэш и тесты
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Тесты не публикуем
+tests/
+
+# Тестовое аудио: длинный файл не коммитим (83 МБ),
+# короткий audio.wav оставляем в репозитории
+*.wav
+!tests/audio_examples/audio.wav
+tests/audio_examples/audio_long.wav
+
+# Модельные артефакты и кэши
+onnx/
+torchinductor*/
+*.ckpt
+*.pt
+
+# Прочее
+.DS_Store
+*tmp*

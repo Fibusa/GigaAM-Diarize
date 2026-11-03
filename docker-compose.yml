@@ -1,0 +1,64 @@
+services:
+  gigaam-api:
+    build:
+      context: .
+      args:
+        # Тот же источник значений, что и у runtime-переменных (см. .env):
+        # модель в слое предзагрузки совпадает с моделью в рантайме.
+        GIGAAM_MODEL: ${GIGAAM_MODEL:-v3_e2e_rnnt}
+      secrets:
+        - hf_token
+    image: gigaam-api:latest
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      GIGAAM_MODEL: ${GIGAAM_MODEL:-v3_e2e_rnnt}
+      HF_TOKEN: ${HF_TOKEN:-}
+      # Секунды до автоудаления завершённой задачи; 0 — выключить.
+      # Задаётся в .env (JOB_TTL_SECONDS=...) или прямо при запуске.
+      JOB_TTL_SECONDS: ${JOB_TTL_SECONDS:-1800}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      # Именованные тома: при первом запуске наполняются содержимым
+      # кэша из образа (модели, скачанные при сборке) и переживают
+      # пересоздание контейнера.
+      - gigaam-cache:/root/.cache/gigaam
+      - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Веб-интерфейс: лёгкий контейнер без GPU (статика + прокси к API).
+  # Браузер открывает только его, поэтому CORS не нужен: запросы к API
+  # проксируются с того же origin на внутреннее имя сервиса.
+  web:
+    build: ./web
+    image: gigaam-web:latest
+    ports:
+      - "${WEBUI_PORT:-8001}:8001"
+    environment:
+      API_BASE_URL: http://gigaam-api:8000
+    depends_on:
+      - gigaam-api
+    restart: unless-stopped
+
+volumes:
+  gigaam-cache:
+  hf-cache:
+
+# Секрет сборки: значение берётся из переменной окружения HF_TOKEN
+# (задаётся в .env) и передаётся в Dockerfile через
+# RUN --mount=type=secret — в метаданные образа токен не попадает.
+secrets:
+  hf_token:
+    environment: HF_TOKEN

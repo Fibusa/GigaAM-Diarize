@@ -1,0 +1,42 @@
+# Git/IDE
+.git/
+.idea/
+.vscode/
+.continue/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Сборка/дистрибутивы
+dist/
+build/
+onnx/
+
+# Локальные артефакты и секреты, в образ не нужны
+.env
+test.py
+tests/
+scripts/
+*.wav
+*.log
+
+# Docker-файлы в контексте сборки не нужны
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+.ipynb_checkpoints/
+.DS_Store

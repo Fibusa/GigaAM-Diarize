@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GigaAM — Диаризация диалогов</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234f8cff'/%3E%3Cpath d='M9 20V12M13 24V8M17 22V10M21 19v-6M25 17v-2' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">GigaAM</span>
+      <span class="brand-sub">диаризация диалогов</span>
+    </div>
+    <div id="server-status" class="status-chip">Проверка сервера…</div>
+  </header>
+
+  <main class="layout">
+    <!-- ============ Загрузка и параметры ============ -->
+    <section class="card" id="upload-card">
+      <h2>Файл</h2>
+      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Выбрать файл">
+        <input type="file" id="file-input" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.oga,.opus,.wma,.aiff,.aif,.mp4,.mkv,.mov,.webm,.avi,.m4v,.mpg,.mpeg,.ts,.3gp">
+        <div class="dz-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="34" height="34"><path d="M12 3v12m0 0 4.5-4.5M12 15l-4.5-4.5M4 19.5h16" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="dz-hint">Перетащите аудио или видео сюда<br><span class="muted">или нажмите для выбора файла</span></div>
+        <div class="dz-formats muted">wav · mp3 · m4a · flac · ogg · opus · mp4 · mkv · mov · webm · avi…</div>
+      </div>
+
+      <div id="file-info" class="file-info hidden">
+        <span id="file-kind" class="badge"></span>
+        <div class="file-names">
+          <div id="file-name" class="file-name"></div>
+          <div id="file-meta" class="muted"></div>
+        </div>
+        <button id="file-clear" class="icon-btn" title="Убрать файл" aria-label="Убрать файл">✕</button>
+      </div>
+      <video id="preview-video" class="preview hidden" controls playsinline></video>
+      <audio id="preview-audio" class="preview hidden" controls></audio>
+
+      <h2>Параметры спикеров</h2>
+      <div class="grid2">
+        <label class="field">
+          <span>Точное число спикеров</span>
+          <input id="num-speakers" type="number" min="1" step="1" placeholder="не указано">
+        </label>
+        <label class="field">
+          <span>Минимум спикеров</span>
+          <input id="min-speakers" type="number" min="1" step="1" placeholder="не указано">
+        </label>
+        <label class="field">
+          <span>Максимум спикеров</span>
+          <input id="max-speakers" type="number" min="1" step="1" placeholder="не указано">
+        </label>
+        <label class="field">
+          <span>Порог совпадения (min_overlap)</span>
+          <input id="min-overlap" type="number" min="0" max="1" step="0.05" value="0.3">
+        </label>
+      </div>
+      <p class="hint muted">Если задано точное число спикеров — минимум/максимум игнорируются. Порог 0–1 определяет, сколько слов реплики должно совпасть со сегментом спикера (по умолчанию 0.3).</p>
+      <div id="form-error" class="error hidden"></div>
+
+      <button id="submit-btn" class="primary" disabled>Отправить на диаризацию</button>
+
+      <div id="progress" class="progress hidden">
+        <div class="progress-row">
+          <span id="status-text" class="status-text"><span class="spinner"></span><span id="status-label">В очереди</span></span>
+          <span id="elapsed" class="muted"></span>
+        </div>
+        <div class="bar"><div id="bar-fill"></div></div>
+        <div class="progress-actions">
+          <button id="cancel-btn" class="ghost hidden">Отменить (пока в очереди)</button>
+        </div>
+      </div>
+      <div id="job-error" class="error hidden"></div>
+    </section>
+
+    <!-- ============ Результат ============ -->
+    <section class="card" id="result-card">
+      <div class="card-head">
+        <h2>Результат</h2>
+        <span id="ttl-note" class="muted"></span>
+      </div>
+      <div id="result-empty" class="muted empty">Результата пока нет — отправьте файл на диаризацию.</div>
+
+      <div id="result" class="hidden">
+        <div id="result-meta" class="meta-row"></div>
+        <div id="speakers-chips" class="chips"></div>
+        <div class="tabs">
+          <button data-view="dialog" class="tab active">Реплики</button>
+          <button data-view="text" class="tab">Полный текст</button>
+        </div>
+        <div id="dialog-view" class="dialog"></div>
+        <div id="text-view" class="text-view hidden"></div>
+        <div class="actions">
+          <button id="copy-btn" class="ghost">Копировать текст</button>
+          <span class="spacer"></span>
+          <button id="dl-txt" class="ghost">TXT</button>
+          <button id="dl-srt" class="ghost">SRT</button>
+          <button id="dl-json" class="ghost">JSON</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ История задач ============ -->
+    <section class="card wide" id="history-card">
+      <div class="card-head">
+        <h2>Задачи на сервере</h2>
+        <button id="history-refresh" class="icon-btn" title="Обновить" aria-label="Обновить">⟳</button>
+      </div>
+      <div id="history-empty" class="muted empty">Список пуст.</div>
+      <div class="table-wrap hidden" id="history-wrap">
+        <table id="history-table">
+          <thead>
+            <tr>
+              <th>ID</th><th>Статус</th><th>Создана</th><th>Завершена</th><th>Ошибка</th><th class="th-actions">Действия</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint muted">Завершённые задачи автоматически удаляются сервером по TTL (см. <code>/health → job_ttl_seconds</code>). Выполняющуюся задачу отменить нельзя — сервер обрабатывает задачи по одной.</p>
+    </section>
+  </main>
+
+  <footer class="footer muted">
+    GigaAM Web UI — отдельный веб-сервис, проксирующий запросы к API-контейнеру. Аудио и видео декодируются на сервере через ffmpeg; сервер обрабатывает одну задачу за раз.
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

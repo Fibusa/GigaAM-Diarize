@@ -1,0 +1,380 @@
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+
+import hydra
+import omegaconf
+import torch
+from torch import Tensor, nn
+from torch.utils.data import DataLoader
+
+from .preprocess import SAMPLE_RATE, load_audio
+from .types import LongformTranscriptionResult, Segment, TranscriptionResult, Word
+from .utils import AudioDataset, onnx_converter
+
+if TYPE_CHECKING:
+    from pyannote.core import Annotation
+
+LONGFORM_THRESHOLD = 25 * SAMPLE_RATE
+
+
+class GigaAM(nn.Module):
+    """
+    Giga Acoustic Model: Self-Supervised Model for Speech Tasks
+    """
+
+    def __init__(self, cfg: omegaconf.DictConfig):
+        super().__init__()
+        self.cfg = cfg
+        self.preprocessor = hydra.utils.instantiate(self.cfg.preprocessor)
+        self.encoder = hydra.utils.instantiate(self.cfg.encoder)
+
+    def forward(
+        self, features: Tensor, feature_lengths: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Perform forward pass through the preprocessor and encoder.
+        """
+        features, feature_lengths = self.preprocessor(features, feature_lengths)
+        if self._device.type == "cpu":
+            return self.encoder(features, feature_lengths)
+        with torch.autocast(device_type=self._device.type, dtype=torch.float16):
+            return self.encoder(features, feature_lengths)
+
+    @property
+    def _device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    @property
+    def _dtype(self) -> torch.dtype:
+        return next(self.parameters()).dtype
+
+    def prepare_wav(self, wav_file: str) -> Tuple[Tensor, Tensor]:
+        """
+        Prepare an audio file for processing by loading it onto
+        the correct device and converting its format.
+        """
+        wav = load_audio(wav_file)
+        wav = wav.to(self._device).to(self._dtype).unsqueeze(0)
+        length = torch.full([1], wav.shape[-1], device=self._device)
+        return wav, length
+
+    def embed_audio(self, wav_file: str) -> Tuple[Tensor, Tensor]:
+        """
+        Extract audio representations using the GigaAM model.
+        """
+        wav, length = self.prepare_wav(wav_file)
+        encoded, encoded_len = self.forward(wav, length)
+        return encoded, encoded_len
+
+    def to_onnx(self, dir_path: str = ".", dtype: torch.dtype = torch.float32) -> None:
+        """
+        Export onnx model encoder to the specified dir.
+        """
+        with self.encoder.onnx_export_mode():
+            self._to_onnx(dir_path, dtype=dtype)
+        omegaconf.OmegaConf.save(self.cfg, f"{dir_path}/{self.cfg.model_name}.yaml")
+
+    def _to_onnx(self, dir_path: str = ".", dtype: torch.dtype = torch.float32) -> None:
+        """
+        Export onnx model encoder to the specified dir.
+        """
+        onnx_converter(
+            model_name=f"{self.cfg.model_name}_encoder",
+            out_dir=dir_path,
+            module=self.encoder,
+            dynamic_axes=self.encoder.dynamic_axes(),
+            export_dtype=dtype,
+        )
+
+
+class GigaAMASR(GigaAM):
+    """
+    Giga Acoustic Model for Speech Recognition
+    """
+
+    def __init__(self, cfg: omegaconf.DictConfig):
+        super().__init__(cfg)
+        self.head = hydra.utils.instantiate(self.cfg.head)
+        self.decoding = hydra.utils.instantiate(self.cfg.decoding)
+
+    def _decode(
+        self,
+        encoded: Tensor,
+        encoded_len: Tensor,
+        wav_lens: Tensor,
+        word_timestamps: bool = False,
+    ) -> List[Tuple[str, Optional[List[Word]]]]:
+        decoded = self.decoding.decode(self.head, encoded, encoded_len)
+        if not word_timestamps:
+            return [(t, None) for t, _, _ in decoded]
+        from .timestamps_utils import compute_frame_shift, frames_to_words
+
+        out: List[Tuple[str, Optional[List[Word]]]] = []
+        for i, (text, token_ids, token_frames) in enumerate(decoded):
+            frame_shift = compute_frame_shift(
+                int(wav_lens[i].item()), int(encoded_len[i].item())
+            )
+            out.append(
+                (
+                    text,
+                    frames_to_words(
+                        self.decoding.tokenizer,
+                        token_ids,
+                        token_frames,
+                        frame_shift,
+                    ),
+                )
+            )
+        return out
+
+    @torch.inference_mode()
+    def transcribe(
+        self, wav_file: str, word_timestamps: bool = False
+    ) -> TranscriptionResult:
+        """
+        Transcribes a short audio file into text.
+        Returns TranscriptionResult with optional word-level timestamps.
+        """
+        wav, length = self.prepare_wav(wav_file)
+        if length.item() > LONGFORM_THRESHOLD:
+            raise ValueError("Too long wav file, use 'transcribe_longform' method.")
+
+        encoded, encoded_len = self.forward(wav, length)
+        text, words = self._decode(encoded, encoded_len, length, word_timestamps)[0]
+        return TranscriptionResult(text=text, words=words)
+
+    def forward_for_export(
+        self, features: Tensor, feature_lengths: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Encoder-decoder forward to save model entirely in onnx format.
+        """
+        encoded, encoded_len = self.encoder(features, feature_lengths)
+        return self.head(encoded), encoded_len
+
+    def _to_onnx(self, dir_path: str = ".", dtype: torch.dtype = torch.float32) -> None:
+        """
+        Export onnx ASR model.
+        `ctc`:  exported entirely in encoder-decoder format.
+        `rnnt`: exported in encoder/decoder/joint parts separately.
+        """
+        if "ctc" in self.cfg.model_name:
+            saved_forward = self.forward
+            self.forward = self.forward_for_export  # type: ignore[assignment, method-assign]
+            try:
+                onnx_converter(
+                    model_name=self.cfg.model_name,
+                    out_dir=dir_path,
+                    module=self,
+                    inputs=self.encoder.input_example(),
+                    input_names=["features", "feature_lengths"],
+                    output_names=["log_probs", "encoded_lengths"],
+                    dynamic_axes={
+                        "features": {0: "batch_size", 2: "seq_len"},
+                        "feature_lengths": {0: "batch_size"},
+                        "log_probs": {0: "batch_size", 1: "seq_len"},
+                        "encoded_lengths": {0: "batch_size"},
+                    },
+                    export_dtype=dtype,
+                )
+            finally:
+                self.forward = saved_forward  # type: ignore[assignment, method-assign]
+        else:
+            super()._to_onnx(dir_path, dtype=dtype)
+            onnx_converter(
+                model_name=f"{self.cfg.model_name}_decoder",
+                out_dir=dir_path,
+                module=self.head.decoder,
+                dynamic_axes=self.head.decoder.dynamic_axes(),
+                export_dtype=dtype,
+            )
+            onnx_converter(
+                model_name=f"{self.cfg.model_name}_joint",
+                out_dir=dir_path,
+                module=self.head.joint,
+                dynamic_axes=self.head.joint.dynamic_axes(),
+                export_dtype=dtype,
+            )
+
+    @torch.inference_mode()
+    def transcribe_longform(
+        self,
+        wav_file: str,
+        word_timestamps: bool = False,
+        fr_batch_size: int = 16,
+        fr_num_workers: int = 0,
+        **kwargs,
+    ) -> LongformTranscriptionResult:
+        """
+        Transcribes a long audio file by splitting it into segments and
+        then transcribing each segment (batched inference via AudioDataset).
+        Use fr_batch_size and fr_num_workers to control the batched inference.
+        Returns LongformTranscriptionResult with segments containing optional word-level timestamps.
+        """
+        from .vad_utils import segment_audio_file
+
+        segments, boundaries = segment_audio_file(
+            wav_file, SAMPLE_RATE, device=self._device, **kwargs
+        )
+
+        if not segments:
+            return LongformTranscriptionResult(segments=[])
+
+        ds = AudioDataset(segments, tokenizer=None)
+        dl = DataLoader(
+            ds,
+            batch_size=fr_batch_size,
+            shuffle=False,
+            collate_fn=AudioDataset.collate,
+            num_workers=fr_num_workers,
+        )
+
+        result_segments: List[Segment] = []
+        idx = 0
+        for wav_pad, wav_lens in dl:
+            wav_pad = wav_pad.to(self._device).to(self._dtype)
+            wav_lens = wav_lens.to(self._device)
+            encoded, encoded_len = self.forward(wav_pad, wav_lens)
+            for text, words in self._decode(
+                encoded, encoded_len, wav_lens, word_timestamps
+            ):
+                seg_start, seg_end = boundaries[idx]
+                idx += 1
+                if word_timestamps:
+                    result_segments.append(
+                        Segment(
+                            text=text,
+                            start=seg_start,
+                            end=seg_end,
+                            words=[
+                                Word(
+                                    text=w.text,
+                                    start=round(w.start + seg_start, 3),
+                                    end=round(w.end + seg_start, 3),
+                                )
+                                for w in words or []
+                            ],
+                        )
+                    )
+                else:
+                    result_segments.append(
+                        Segment(text=text, start=seg_start, end=seg_end)
+                    )
+        return LongformTranscriptionResult(segments=result_segments)
+
+    @torch.inference_mode()
+    def diarize(
+        self,
+        wav_file: str,
+        num_speakers: Optional[int] = None,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+    ) -> "Annotation":
+        """
+        Performs speaker diarization on the audio file using a PyAnnote diarization pipeline.
+        Returns Annotation with speaker turns labeled as SPEAKER_00, SPEAKER_01, etc.
+        """
+        from .vad_utils import get_diarization_pipeline
+        from pyannote.core import Annotation
+
+        pipeline = get_diarization_pipeline(self._device)
+        output = pipeline(
+            wav_file,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        # pyannote.audio 4.x wraps the results in a DiarizeOutput dataclass,
+        # while older versions (or the legacy mode) return the Annotation directly.
+        if isinstance(output, Annotation):
+            return output
+        return cast(Annotation, output.speaker_diarization)
+
+    def transcribe_and_diarize(
+        self,
+        wav_file: str,
+        num_speakers: Optional[int] = None,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+        min_overlap: float = 0.3,
+        **kwargs,
+    ) -> LongformTranscriptionResult:
+        """
+        Transcribes a long audio file and assigns speakers to the transcription.
+        Runs diarization and longform transcription on the same file, then
+        matches word timings against the diarized speaker turns: every word
+        gets the label of the speaker whose turn overlaps it the most (at
+        least `min_overlap` of the word duration), and segments are split at
+        speaker changes. Pass num_speakers/min_speakers/max_speakers to
+        constrain the diarization; extra kwargs are forwarded to
+        transcribe_longform.
+        Returns LongformTranscriptionResult with optional speaker labels on
+        segments and words (None where timings could not be matched).
+        """
+        from .diarize_utils import assign_speakers
+
+        annotation = self.diarize(
+            wav_file,
+            num_speakers=num_speakers,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        result = self.transcribe_longform(wav_file, word_timestamps=True, **kwargs)
+        return assign_speakers(result, annotation, min_overlap=min_overlap)
+
+
+class GigaAMEmo(GigaAM):
+    """
+    Giga Acoustic Model for Emotion Recognition
+    """
+
+    def __init__(self, cfg: omegaconf.DictConfig):
+        super().__init__(cfg)
+        self.head = hydra.utils.instantiate(self.cfg.head)
+        self.id2name = cfg.id2name
+
+    def get_probs(self, wav_file: str) -> Dict[str, float]:
+        """
+        Calculate probabilities for each emotion class based on the provided audio file.
+        """
+        wav, length = self.prepare_wav(wav_file)
+        encoded, _ = self.forward(wav, length)
+        encoded_pooled = nn.functional.avg_pool1d(
+            encoded, kernel_size=encoded.shape[-1]
+        ).squeeze(-1)
+
+        logits = self.head(encoded_pooled)[0]
+        probs = nn.functional.softmax(logits, dim=-1).detach().tolist()
+
+        return {self.id2name[i]: probs[i] for i in range(len(self.id2name))}
+
+    def forward_for_export(self, features: Tensor, feature_lengths: Tensor) -> Tensor:
+        """
+        Encoder-decoder forward to save model entirely in onnx format.
+        """
+        encoded, _ = self.encoder(features, feature_lengths)
+        enc_pooled = encoded.mean(dim=-1)
+        return nn.functional.softmax(self.head(enc_pooled), dim=-1)
+
+    def _to_onnx(self, dir_path: str = ".", dtype: torch.dtype = torch.float32) -> None:
+        """
+        Export onnx Emo model.
+        """
+        saved_forward = self.forward
+        self.forward = self.forward_for_export  # type: ignore[assignment, method-assign]
+        try:
+            onnx_converter(
+                model_name=self.cfg.model_name,
+                out_dir=dir_path,
+                module=self,
+                inputs=self.encoder.input_example(),
+                input_names=["features", "feature_lengths"],
+                output_names=["probs"],
+                dynamic_axes={
+                    "features": {0: "batch_size", 2: "seq_len"},
+                    "feature_lengths": {0: "batch_size"},
+                    "probs": {0: "batch_size", 1: "seq_len"},
+                },
+                export_dtype=dtype,
+            )
+        finally:
+            self.forward = saved_forward  # type: ignore[assignment, method-assign]
