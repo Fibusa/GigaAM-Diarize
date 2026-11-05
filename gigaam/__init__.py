@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import ssl
 import time
 import urllib.request
 import warnings
@@ -29,6 +30,17 @@ _CACHE_DIR = os.path.expanduser("~/.cache/gigaam")
 # Url with model checkpoints
 _URL_DIR = "https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM"
 _DOWNLOAD_RETRIES = 3
+
+# Проверка SSL-сертификата при скачивании чекпоинтов с CDN. По умолчанию
+# отключена (GIGAAM_INSECURE_SSL=1): в проде CDN может отдавать истёкший
+# сертификат, а целостность скачанного чекпоинта в любом случае сверяется
+# по MD5 в load_model. Вернуть строгую проверку можно, задав
+# GIGAAM_INSECURE_SSL=0.
+_INSECURE_SSL = os.getenv("GIGAAM_INSECURE_SSL", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
 _MODEL_HASHES = {
     "emo": "7ce76f9535cb254488985057c0d33006",
     "v1_ctc": "f027f199e590a391d015aeede2e66174",
@@ -57,10 +69,15 @@ def _download_file(
         return file_path
 
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    ssl_context = None
+    if _INSECURE_SSL:
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
     for attempt in range(1, retries + 1):
         try:
             with (
-                urllib.request.urlopen(file_url) as source,
+                urllib.request.urlopen(file_url, context=ssl_context) as source,
                 open(file_path, "wb") as output,
             ):
                 with tqdm(

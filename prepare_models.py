@@ -6,7 +6,11 @@
 
 Что кэшируется:
   1. Чекпоинт GigaAM (GIGAAM_MODEL, по умолчанию v3_e2e_rnnt) -> ~/.cache/gigaam.
-     Качается с CDN, токен не нужен.
+     Качается с CDN, токен не нужен. Скачивание по умолчанию не проверяет
+     SSL-сертификат CDN (в проде он может быть истёкшим; GIGAAM_INSECURE_SSL=1
+     по умолчанию, строгая проверка — GIGAAM_INSECURE_SSL=0). Шаг обязательный:
+     если чекпоинт не скачался, сборка падает с явной ошибкой — иначе первый
+     запрос к API упрётся в скачивание модели.
   2. pyannote/segmentation-3.0 — модель VAD -> ~/.cache/huggingface.
   3. pyannote/speaker-diarization-community-1 (модель диаризации по умолчанию)
      и её подмодели (сегментация, эмбеддинги, PLDA). Это гейтед-модель:
@@ -44,12 +48,23 @@ def _step(title: str, func) -> bool:
 def main() -> int:
     device = torch.device("cpu")
     model_name = os.getenv("GIGAAM_MODEL", "v3_e2e_rnnt")
-    ok = True
 
-    ok &= _step(
+    # Чекпоинт GigaAM качается с CDN без токена, поэтому если он не
+    # закэшировался на этапе сборки (сеть, SSL), первый запрос всё равно
+    # упрётся в скачивание — это то, чего сборка должна не допускать.
+    # Падаем с явной ошибкой, чтобы проблема была видна при билде.
+    if not _step(
         f"Loading GigaAM checkpoint '{model_name}'",
         lambda: gigaam.load_model(model_name, device=device),
-    )
+    ):
+        print(
+            "[prepare_models] ERROR: GigaAM checkpoint was not cached. "
+            "Check network access to the model CDN and rebuild the image.",
+            flush=True,
+        )
+        return 1
+
+    ok = True
 
     ok &= _step(
         "Loading pyannote VAD (segmentation-3.0)",
