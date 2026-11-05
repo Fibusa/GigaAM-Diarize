@@ -8,7 +8,12 @@
   1. Чекпоинт GigaAM (GIGAAM_MODEL, по умолчанию v3_e2e_rnnt) -> ~/.cache/gigaam.
      Качается с CDN, токен не нужен.
   2. pyannote/segmentation-3.0 — модель VAD -> ~/.cache/huggingface.
-  3. pyannote/speaker-diarization-3.1 и её подмодели (сегментация, эмбеддинги).
+  3. pyannote/speaker-diarization-community-1 (модель диаризации по умолчанию)
+     и её подмодели (сегментация, эмбеддинги, PLDA). Это гейтед-модель с
+     лицензией CC-BY-4.0: для скачивания нужно принять условия на странице
+     модели под пользователем HF_TOKEN. Если модель недоступна, сервис при
+     старте перейдёт на pyannote/speaker-diarization-3.1 (см. предупреждение).
+     Модель можно переопределить переменной PYANNOTE_DIARIZATION_MODEL.
 
 Для пунктов 2-3 нужен HF_TOKEN (переменная окружения или аргумент сборки).
 Если токена нет, скрипт НЕ ломает сборку: печатает предупреждение, и модели
@@ -52,7 +57,8 @@ def main() -> int:
     )
 
     ok &= _step(
-        "Loading pyannote diarization pipeline (speaker-diarization-3.1)",
+        "Loading pyannote diarization pipeline "
+        "(speaker-diarization-community-1, fallback 3.1)",
         lambda: get_diarization_pipeline(device),
     )
 

@@ -277,8 +277,13 @@ class GigaAMASR(GigaAM):
         from pyannote.core import Annotation
 
         pipeline = get_diarization_pipeline(self._device)
+
+        # Feed the waveform decoded by load_audio (mono 16 kHz, [-1, 1]) instead
+        # of the file path: pyannote skips its own decoding (torchcodec) and
+        # works on exactly the same samples as the ASR part.
+        wav = load_audio(wav_file)
         output = pipeline(
-            wav_file,
+            {"waveform": wav.unsqueeze(0), "sample_rate": SAMPLE_RATE},
             num_speakers=num_speakers,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
