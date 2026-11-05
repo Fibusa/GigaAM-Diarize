@@ -1091,8 +1091,11 @@ function initLlmPanel() {
     persist();
   });
   updatePromptNote();
-  // Подсказка моделей из Ollama (GET /api/llm/models); при недоступном
-  // Ollama просто оставляем поле пустым — ошибку не показываем.
+  // Подсказка моделей из Ollama (GET /api/llm/models): backend сначала
+  // берёт /api/ps (модели, уже загруженные в память), затем /api/tags
+  // (установленные). Пустой список не оставляем молча — причина
+  // из поля error показывается под полем модели.
+  const note = $('llm-model-note');
   api('/llm/models')
     .then((data) => {
       const list = $('llm-model-list');
@@ -1103,8 +1106,21 @@ function initLlmPanel() {
         opt.value = name;
         list.appendChild(opt);
       }
+      if (note) {
+        if (data.models.length) {
+          note.textContent = data.source === 'ps'
+            ? 'модели уже загружены в Ollama (api/ps)'
+            : 'модели установлены в Ollama (api/tags)';
+        } else {
+          note.textContent = data.error
+            ? 'Ollama: ' + data.error
+            : 'в Ollama пока нет установленных моделей';
+        }
+      }
     })
-    .catch(() => { /* Ollama недоступна — без подсказок */ });
+    .catch(() => {
+      if (note) note.textContent = 'Ollama: не удалось получить список моделей';
+    });
 }
 
 async function onSummaryCopy() {

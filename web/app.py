@@ -410,11 +410,15 @@ def _build_llm_user_content(req: SummarizeRequest) -> str:
     return "\n".join(lines)
 
 
-def _ollama_model_names(path: str) -> List[str]:
-    """Имена моделей из JSON-ответа Ollama (GET /api/tags или /api/ps).
+def _ollama_list(path: str) -> Tuple[List[str], Optional[str]]:
+    """Запрашивает у Ollama список моделей (GET /api/ps или /api/tags).
 
-    Оба эндпоинта отвечают {"models": [{"name": ...}, ...]}; при любой
-    ошибке транспорта/разбора возвращаем пустой список, а не исключение.
+    Оба эндпоинта отвечают {"models": [{"name": ...}, ...]}. Возвращает
+    пару (имена, ошибка): при успехе ошибка None; при сбое список пуст,
+    а ошибка содержит краткую причину (нет соединения / HTTP-статус /
+    невалидный JSON), чтобы показать её пользователю в интерфейсе.
+    Эмбеддинг-модели (единственная capability «embedding», например
+    bge-m3) исключаются: для суммаризации они непригодны.
     """
     url = urlparse(OLLAMA_URL)
     conn_cls = HTTPSConnection if url.scheme == "https" else HTTPConnection
@@ -426,18 +430,29 @@ def _ollama_model_names(path: str) -> List[str]:
             raw = resp.read()
         finally:
             conn.close()
-    except (OSError, TimeoutError):
-        return []
+    except (OSError, TimeoutError) as exc:
+        return [], f"нет соединения ({exc})"
+    if resp.status != 200:
+        return [], f"Ollama ответила HTTP {resp.status}"
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
     except ValueError:
-        return []
+        return [], "невалидный JSON в ответе Ollama"
     names: List[str] = []
     if isinstance(data, dict):
         for item in data.get("models") or []:
-            if isinstance(item, dict) and item.get("name"):
-                names.append(str(item["name"]))
-    return names
+            if not (isinstance(item, dict) and item.get("name")):
+                continue
+            caps = item.get("capabilities")
+            if (
+                isinstance(caps, list)
+                and caps
+                and "embedding" in caps
+                and "completion" not in caps
+            ):
+                continue
+            names.append(str(item["name"]))
+    return names, None
 
 
 def _resolve_model(requested: str) -> Optional[str]:
@@ -450,10 +465,10 @@ def _resolve_model(requested: str) -> Optional[str]:
     """
     if requested:
         return requested
-    loaded = _ollama_model_names("/api/ps")
+    loaded, _ = _ollama_list("/api/ps")
     if loaded:
         return loaded[0]
-    installed = _ollama_model_names("/api/tags")
+    installed, _ = _ollama_list("/api/tags")
     if installed:
         return installed[0]
     return None
@@ -555,14 +570,27 @@ def summarize(req: SummarizeRequest) -> Response:
 
 @app.get("/api/llm/models")
 def llm_models() -> Response:
-    """Список моделей, установленных в Ollama (GET /api/tags).
+    """Список моделей для подсказки в поле модели интерфейса.
 
-    Используется интерфейсом для подсказки в поле модели; при недоступном
-    Ollama возвращает пустой список (ошибку не бросаем).
+    Сначала GET /api/ps — модели, уже загруженные в память Ollama
+    (выбор одной из них самый быстрый); если загруженных нет —
+    GET /api/tags (все установленные). Когда список получить не
+    удалось, `error` содержит краткую причину — интерфейс показывает
+    её под полем модели, а не молча оставляет список пустым.
     """
-    names = _ollama_model_names("/api/tags")
+    names, error = _ollama_list("/api/ps")
+    source = "ps" if names else None
+    if not names:
+        installed, tags_error = _ollama_list("/api/tags")
+        if installed:
+            names, source = installed, "tags"
+        else:
+            error = error or tags_error
     return Response(
-        content=json.dumps({"models": names}, ensure_ascii=False),
+        content=json.dumps(
+            {"models": names, "source": source, "error": error},
+            ensure_ascii=False,
+        ),
         media_type="application/json; charset=utf-8",
     )
 
