@@ -7,6 +7,9 @@
 const $ = (id) => document.getElementById(id);
 
 const LS_KEY = 'gigaam.webui.job';
+const LS_PROMPT_KEY = 'gigaam.webui.sysprompt';
+const LS_MODEL_KEY = 'gigaam.webui.llmmodel';
+const LS_SUMMARY_KEY = 'gigaam.webui.summary';
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const STATUS_RU = {
   queued: 'В очереди',
@@ -15,6 +18,25 @@ const STATUS_RU = {
   failed: 'Ошибка',
   cancelled: 'Отменена',
 };
+
+// Должен совпадать с DEFAULT_SYSTEM_PROMPT в web/app.py.
+const DEFAULT_SYSTEM_PROMPT = [
+  'Ты — ассистент, который суммаризирует расшифровки встреч (митингов) на русском языке. Тебе даётся стенограмма с метками времени и спикеров.',
+  '',
+  'Составь структурированное резюме встречи:',
+  '1. Краткое описание (2–4 предложения): о чём встреча и кто участвовал.',
+  '2. Основные темы обсуждения — короткий маркированный список.',
+  '3. Принятые решения — список; если решений нет, так и напиши.',
+  '4. Открытые вопросы и неясности.',
+  '5. Action items (задачи): кто — что делает — к какому сроку; если срок не прозвучал, укажи «срок не назван».',
+  '',
+  'Правила:',
+  '- Опирайся только на текст расшифровки, ничего не додумывай.',
+  '- Сохраняй обозначения спикеров как в стенограмме (SPEAKER_XX), если настоящие имена не прозвучали.',
+  '- Пиши кратко и по делу, без воды.',
+  '- Отвечай на русском языке; если стенограмма на другом языке — отвечай на языке стенограммы.',
+  '- Оформи ответ в Markdown с заголовками разделов.',
+].join('\n');
 
 const VIDEO_EXT = ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v', 'mpg', 'mpeg', 'ts', '3gp'];
 const AUDIO_EXT = ['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'oga', 'opus', 'wma', 'aiff', 'aif'];
@@ -34,14 +56,25 @@ const state = {
   pollFails: 0,
   elapsedTimer: null,
   elapsedBase: null,
+  summarizing: false,  // выполняется запрос /api/summarize
+  summaryFor: null,    // job_id, для которого получена суммаризация
+  summaryData: null,   // ответ /api/summarize {summary, model, usage}
 };
 
 /* ========================= утилиты ========================= */
 
 function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;',
-  }[c]));
+  // Сущности собираются конкатенацией: литерал "&amp;" в исходнике
+  // рискует быть нормализован обратно в "&" при записи файла.
+  const amp = '&' + '';
+  const map = {
+    '&': amp + 'amp;',
+    '<': amp + 'lt;',
+    '>': amp + 'gt;',
+    '"': amp + 'quot;',
+    "'": amp + '#39;',
+  };
+  return String(s ?? '').replace(/[&<>"']/g, (c) => map[c]);
 }
 
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -159,6 +192,11 @@ async function setFile(file) {
   state.duration = null;
   state.result = null;
   hideErrors();
+  // новый файл — прежняя суммаризация больше не относится к задаче
+  state.summarizing = false;
+  state.summaryFor = null;
+  state.summaryData = null;
+  resetSummaryUI();
 
   if (state.fileUrl) URL.revokeObjectURL(state.fileUrl);
   state.fileUrl = URL.createObjectURL(file);
@@ -438,6 +476,9 @@ function finishJob(job) {
     hideProgress();
     clearLastJob();
     renderResult(job.result || {});
+    // Автосуммаризация — только здесь: свежее завершение задачи.
+    // restoreLastJob/openJob просто перерисовывают результат и не тратят токены.
+    requestSummary('auto');
   } else if (job.status === 'failed') {
     hideProgress();
     showError($('job-error'), job.error || 'Задача завершилась с ошибкой');
@@ -470,6 +511,7 @@ function showEmptyResult() {
   $('result-empty').classList.remove('hidden');
   $('result').classList.add('hidden');
   state.result = null;
+  resetSummaryUI();
 }
 
 function renderResult(result) {
@@ -526,6 +568,7 @@ function renderResult(result) {
 
   $('text-view').textContent = result.text || '(пусто)';
   switchTab('dialog');
+  restoreOrResetSummary();
 }
 
 function switchTab(view) {
@@ -542,6 +585,260 @@ function seekPreview(sec) {
   if (el.classList.contains('hidden')) return;
   el.currentTime = sec;
   el.play().catch(() => { /* автозапуск может быть запрещён */ });
+}
+
+/* ========================= мини-Markdown (безопасный рендер) ========================= */
+
+/** Инлайновая разметка; вход уже экранирован escapeHtml. */
+function mdInline(s) {
+  return s
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+/**
+ * Markdown → HTML. Весь текст экранируется ДО вставки тегов, поэтому
+ * HTML/JS из ответа LLM не может «просочиться» (XSS-safe).
+ * Поддержка: заголовки, **жирный**, *курсив*, `код`, ```-блоки, списки,
+ * таблицы, цитаты, ссылки, горизонтальные линии.
+ */
+function mdToHtml(md) {
+  const lines = String(md ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let para = [];
+  let openList = null;   // 'ul' | 'ol'
+  let code = null;       // { buf: [] } для ```-блоков
+  let quote = [];
+  let table = null;      // { header: [], rows: [[]] }
+
+  const closePara = () => {
+    if (para.length) { out.push(`<p>${mdInline(para.join('<br>'))}</p>`); para = []; }
+  };
+  const closeList = () => {
+    if (openList) { out.push(`</${openList}>`); openList = null; }
+  };
+  const closeQuote = () => {
+    if (quote.length) { out.push(`<blockquote>${mdToHtml(quote.join('\n'))}</blockquote>`); quote = []; }
+  };
+  const closeTable = () => {
+    if (!table) return;
+    let html = '<table><thead><tr>';
+    for (const c of table.header) html += `<th>${mdInline(c)}</th>`;
+    html += '</tr></thead>';
+    if (table.rows.length) {
+      html += '<tbody>';
+      for (const r of table.rows) {
+        html += '<tr>';
+        for (const c of r) html += `<td>${mdInline(c)}</td>`;
+        html += '</tr>';
+      }
+      html += '</tbody>';
+    }
+    out.push(html + '</table>');
+    table = null;
+  };
+  const closeAll = () => { closeTable(); closeQuote(); closeList(); closePara(); };
+
+  const splitRow = (line) => {
+    let s = line.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|')) s = s.slice(0, -1);
+    return s.split('|').map((c) => c.trim());
+  };
+  const isSepRow = (cells) =>
+    cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+
+    if (code !== null) {
+      if (/^\s*```/.test(line)) { out.push(`<pre><code>${escapeHtml(code.buf.join('\n'))}</code></pre>`); code = null; }
+      else code.buf.push(line);
+      continue;
+    }
+    const fence = line.match(/^\s*```/);
+    if (fence) { closeAll(); code = { buf: [] }; continue; }
+
+    if (!line.trim()) { closeAll(); continue; }
+
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      closeAll();
+      const lvl = h[1].length;
+      out.push(`<h${lvl}>${mdInline(escapeHtml(h[2].trim()))}</h${lvl}>`);
+      continue;
+    }
+
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { closeAll(); out.push('<hr>'); continue; }
+
+    if (/^\s*>/.test(line)) {
+      closeTable(); closeList(); closePara();
+      quote.push(line.replace(/^\s*>\s?/, ''));
+      continue;
+    }
+
+    // таблица: строка с «|», за которой следует разделитель из дефисов
+    if (line.includes('|') && idx + 1 < lines.length) {
+      const next = lines[idx + 1];
+      if (next.includes('|') && isSepRow(splitRow(next))) {
+        closeAll();
+        table = { header: splitRow(line).map(escapeHtml), rows: [] };
+        idx++; // пропускаем разделитель
+        continue;
+      }
+    }
+    if (table && line.includes('|')) { table.rows.push(splitRow(line).map(escapeHtml)); continue; }
+
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      closeTable(); closeQuote(); closePara();
+      const want = ul ? 'ul' : 'ol';
+      if (openList !== want) { closeList(); out.push(`<${want}>`); openList = want; }
+      out.push(`<li>${mdInline(escapeHtml((ul || ol)[1].trim()))}</li>`);
+      continue;
+    }
+
+    para.push(escapeHtml(line.trim()));
+  }
+  closeAll();
+  return out.join('\n');
+}
+
+/* ========================= LLM-суммаризация ========================= */
+
+function resetSummaryUI(emptyText) {
+  $('summary-progress').classList.add('hidden');
+  $('summary-error').classList.add('hidden');
+  $('summary-result').classList.add('hidden');
+  const empty = $('summary-empty');
+  empty.classList.remove('hidden');
+  empty.textContent = emptyText ||
+    'После завершения диаризации расшифровка автоматически уйдёт в OpenRouter, и здесь появится резюме встречи.';
+  $('summary-rerun').disabled = !state.result;
+}
+
+function resultHasText(result) {
+  if (!result) return false;
+  const utts = Array.isArray(result.utterances) ? result.utterances : [];
+  if (utts.some((u) => String((u && u.text) || '').trim())) return true;
+  return String(result.text || '').trim().length > 0;
+}
+
+function readSummaryCache() {
+  try {
+    const raw = localStorage.getItem(LS_SUMMARY_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.jobId && parsed.data) return parsed;
+  } catch (err) { /* повреждённый кэш игнорируем */ }
+  return null;
+}
+
+function saveSummaryCache() {
+  try {
+    if (state.summaryFor && state.summaryData) {
+      localStorage.setItem(LS_SUMMARY_KEY, JSON.stringify({
+        jobId: state.summaryFor,
+        data: state.summaryData,
+      }));
+    }
+  } catch (err) { /* приватный режим браузера и т.п. */ }
+}
+
+function clearSummaryCache() {
+  try { localStorage.removeItem(LS_SUMMARY_KEY); } catch (err) { /* ignore */ }
+}
+
+function renderSummary(data, startedMs) {
+  $('summary-progress').classList.add('hidden');
+  $('summary-error').classList.add('hidden');
+  $('summary-empty').classList.add('hidden');
+  $('summary-result').classList.remove('hidden');
+
+  const parts = [];
+  if (data.model) parts.push(`модель: ${data.model}`);
+  const usage = data.usage || {};
+  const tokens = usage.total_tokens ?? usage.prompt_tokens ?? usage.completion_tokens;
+  if (tokens != null) parts.push(`токенов: ${tokens}`);
+  if (startedMs != null) parts.push(`${((Date.now() - startedMs) / 1000).toFixed(1)} с`);
+  $('summary-meta').textContent = parts.join(' · ');
+  $('summary-body').innerHTML = mdToHtml(data.summary || '(пусто)');
+}
+
+/** Показывает прежнюю суммаризацию этой же задачи или сбрасывает панель. */
+function restoreOrResetSummary() {
+  const jobId = state.job && state.job.job_id;
+  if (state.summarizing) return; // не трогаем панель во время активного запроса
+  if (state.summaryData && state.summaryFor && state.summaryFor === jobId) {
+    renderSummary(state.summaryData, null);
+    return;
+  }
+  const cached = readSummaryCache();
+  if (cached && cached.jobId === jobId) {
+    state.summaryFor = cached.jobId;
+    state.summaryData = cached.data;
+    renderSummary(cached.data, null);
+    return;
+  }
+  state.summaryFor = null;
+  state.summaryData = null;
+  resetSummaryUI();
+}
+
+async function requestSummary(trigger) {
+  if (state.summarizing) return;
+  const result = state.result;
+  if (!result) return;
+  if (!resultHasText(result)) {
+    state.summaryFor = null;
+    state.summaryData = null;
+    resetSummaryUI('Речь в задаче не обнаружена — суммаризировать нечего.');
+    return;
+  }
+  state.summarizing = true;
+  $('summary-rerun').disabled = true;
+  $('summary-empty').classList.add('hidden');
+  $('summary-error').classList.add('hidden');
+  $('summary-result').classList.add('hidden');
+  $('summary-progress').classList.remove('hidden');
+  $('summary-status-label').textContent =
+    trigger === 'auto' ? 'Суммаризация встречи…' : 'Повторная суммаризация встречи…';
+  const started = Date.now();
+  try {
+    const payload = {
+      utterances: result.utterances || null,
+      text: result.text || null,
+      duration: result.duration ?? null,
+      speakers: result.speakers || null,
+      system_prompt: ($('system-prompt').value || '').trim() || null,
+      model: ($('llm-model').value || '').trim() || null,
+    };
+    const data = await api('/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    state.summaryFor = state.job ? state.job.job_id : null;
+    state.summaryData = data;
+    saveSummaryCache();
+    renderSummary(data, started);
+  } catch (err) {
+    state.summaryFor = null;
+    state.summaryData = null;
+    clearSummaryCache();
+    $('summary-progress').classList.add('hidden');
+    showError($('summary-error'),
+      (err && err.detail) ||
+      'Не удалось получить суммаризацию. Проверьте подключение и нажмите «Суммаризовать заново».');
+  } finally {
+    state.summarizing = false;
+    $('summary-rerun').disabled = !state.result;
+  }
 }
 
 /* ========================= экспорт ========================= */
@@ -762,6 +1059,53 @@ function restoreLastJob() {
 
 /* ========================= инициализация ========================= */
 
+function updatePromptNote() {
+  const note = $('prompt-note');
+  const current = ($('system-prompt').value || '').trim();
+  const isDefault = current === DEFAULT_SYSTEM_PROMPT.trim();
+  note.textContent = isDefault
+    ? 'промт по умолчанию · суммаризация выполняется через OpenRouter после завершения диаризации'
+    : 'промт изменён и сохранён в этом браузере';
+}
+
+function initLlmPanel() {
+  const promptEl = $('system-prompt'), modelEl = $('llm-model');
+  try {
+    promptEl.value = localStorage.getItem(LS_PROMPT_KEY) ?? DEFAULT_SYSTEM_PROMPT;
+    modelEl.value = localStorage.getItem(LS_MODEL_KEY) || '';
+  } catch (err) {
+    promptEl.value = DEFAULT_SYSTEM_PROMPT;
+    modelEl.value = '';
+  }
+  const persist = () => {
+    try {
+      localStorage.setItem(LS_PROMPT_KEY, promptEl.value);
+      localStorage.setItem(LS_MODEL_KEY, modelEl.value.trim());
+    } catch (err) { /* приватный режим браузера и т.п. */ }
+    updatePromptNote();
+  };
+  promptEl.addEventListener('input', persist);
+  modelEl.addEventListener('input', persist);
+  $('prompt-reset').addEventListener('click', () => {
+    promptEl.value = DEFAULT_SYSTEM_PROMPT;
+    persist();
+  });
+  updatePromptNote();
+}
+
+async function onSummaryCopy() {
+  const btn = $('summary-copy');
+  // копируем исходный Markdown, а не отрендеренный текст
+  const text = (state.summaryData && state.summaryData.summary) || $('summary-body').textContent || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    btn.textContent = 'Скопировано ✓';
+  } catch (err) {
+    btn.textContent = 'Не удалось скопировать';
+  }
+  setTimeout(() => { btn.textContent = 'Копировать резюме'; }, 1500);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const dz = $('dropzone'), input = $('file-input');
 
@@ -799,6 +1143,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   $('history-refresh').addEventListener('click', refreshHistory);
   setInterval(refreshHistory, 15000);
+
+  initLlmPanel();
+  $('summary-rerun').addEventListener('click', () => requestSummary('manual'));
+  $('summary-copy').addEventListener('click', onSummaryCopy);
 
   refreshHealth();
   setInterval(refreshHealth, 30000);

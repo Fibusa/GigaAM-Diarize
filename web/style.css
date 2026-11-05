@@ -331,3 +331,111 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .grid2 { grid-template-columns: 1fr; }
   .utt { grid-template-columns: 84px 96px 1fr; }
 }
+
+/* ---------- LLM: системный промт (складная панель) ---------- */
+details#prompt-details > summary.card-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 2px 6px;
+  margin: -2px -6px 10px;
+  border-radius: 10px;
+  user-select: none;
+}
+details#prompt-details > summary.card-summary::-webkit-details-marker { display: none; }
+details#prompt-details > summary.card-summary:hover { background: var(--panel-2); }
+.summary-title { font-weight: 650; font-size: 17px; color: var(--text); }
+.summary-note { font-size: 12px; flex: 1; text-align: right; }
+.summary-chevron { color: var(--muted); font-size: 13px; transition: transform .18s ease; }
+details#prompt-details[open] .summary-chevron { transform: rotate(180deg); }
+.details-body { display: grid; gap: 10px; padding-top: 2px; }
+.llm-row { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }
+.llm-row .field { flex: 1 1 260px; }
+
+/* ---------- LLM: панель суммаризации ---------- */
+textarea#system-prompt {
+  width: 100%;
+  resize: vertical;
+  min-height: 140px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+textarea#system-prompt:focus { outline: none; border-color: var(--accent); }
+.summary-body {
+  overflow-wrap: anywhere;
+  max-height: 560px;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+/* --- Markdown внутри панели суммаризации --- */
+.summary-body > :first-child { margin-top: 0; }
+.summary-body > :last-child { margin-bottom: 0; }
+.summary-body h1, .summary-body h2, .summary-body h3,
+.summary-body h4, .summary-body h5, .summary-body h6 {
+  margin: 14px 0 8px;
+  line-height: 1.3;
+  color: var(--text);
+}
+.summary-body h1 { font-size: 18px; }
+.summary-body h2 { font-size: 16px; }
+.summary-body h3 { font-size: 14.5px; }
+.summary-body h4, .summary-body h5, .summary-body h6 { font-size: 13.5px; }
+.summary-body p { margin: 8px 0; }
+.summary-body ul, .summary-body ol { margin: 8px 0; padding-left: 22px; }
+.summary-body li { margin: 4px 0; }
+.summary-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 10px 0;
+  font-size: 12.5px;
+}
+.summary-body th, .summary-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.summary-body th { background: var(--panel); font-weight: 650; }
+.summary-body tbody tr:nth-child(even) { background: rgba(255, 255, 255, .025); }
+.summary-body code {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 5px;
+}
+.summary-body pre {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  overflow-x: auto;
+}
+.summary-body pre code { background: none; border: none; padding: 0; white-space: pre-wrap; }
+.summary-body blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+  border-radius: 0 8px 8px 0;
+  color: var(--muted);
+}
+.summary-body a { color: var(--accent); }
+.summary-body hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+#summary-card .card-head h2 { margin-right: auto; }

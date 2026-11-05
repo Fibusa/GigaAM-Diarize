@@ -9,6 +9,14 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 WORKDIR /app
 
+# ffmpeg нужен для перекодирования загрузок (MP4/M4A/WebM и т.п.) в
+# 16 кГц mono WAV перед отправкой в API: у контейнерных форматов с
+# edit list сдвигом аудиопотока pyannote не может декодировать окна
+# через torchcodec (дефицит сэмплов, задание падает).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Зависимости отдельным слоем: пересобираются только при изменении requirements.txt.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

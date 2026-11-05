@@ -105,6 +105,53 @@
       </div>
     </section>
 
+    <!-- ============ LLM: системный промт (складной) ============ -->
+    <section class="card wide" id="llm-prompt-card">
+      <details id="prompt-details">
+        <summary class="card-summary">
+          <span class="summary-title">Системный промт для LLM</span>
+          <span id="prompt-note" class="muted summary-note">суммаризация выполняется через OpenRouter после завершения диаризации</span>
+          <span class="summary-chevron" aria-hidden="true">▾</span>
+        </summary>
+        <div class="details-body">
+          <p class="hint muted">Промт и расшифровка уходят в OpenRouter сразу после завершения диаризации. Пустое поле — будет использован промт по умолчанию. Значения сохраняются в этом браузере.</p>
+          <div class="llm-row">
+            <label class="field">
+              <span>Модель OpenRouter</span>
+              <input id="llm-model" type="text" placeholder="z-ai/glm-5.3-flash (по умолчанию)">
+            </label>
+            <button id="prompt-reset" class="ghost">Вернуть промт по умолчанию</button>
+          </div>
+          <label class="field">
+            <span>Текст системного промта</span>
+            <textarea id="system-prompt" rows="9" spellcheck="false"></textarea>
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <!-- ============ LLM: результат суммаризации ============ -->
+    <section class="card wide" id="summary-card">
+      <div class="card-head">
+        <h2>Суммаризация встречи (LLM)</h2>
+        <button id="summary-rerun" class="ghost" disabled title="Повторная отправка расшифровки в OpenRouter">Суммаризовать заново</button>
+      </div>
+      <div id="summary-empty" class="muted empty">После завершения диаризации расшифровка автоматически уйдёт в OpenRouter, и здесь появится резюме встречи.</div>
+      <div id="summary-progress" class="progress hidden">
+        <div class="progress-row">
+          <span class="status-text"><span class="spinner"></span><span id="summary-status-label">Суммаризация встречи…</span></span>
+        </div>
+      </div>
+      <div id="summary-error" class="error hidden"></div>
+      <div id="summary-result" class="hidden">
+        <div id="summary-meta" class="meta-row"></div>
+        <div id="summary-body" class="summary-body"></div>
+        <div class="actions">
+          <button id="summary-copy" class="ghost">Копировать резюме</button>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ История задач ============ -->
     <section class="card wide" id="history-card">
       <div class="card-head">
