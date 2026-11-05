@@ -51,11 +51,15 @@ services:
       - "${WEBUI_PORT:-8001}:8001"
     environment:
       API_BASE_URL: http://gigaam-api:8000
-      # Ключ OpenRouter для суммаризации встреч (задаётся в .env); без него
-      # POST /api/summarize возвращает 503. Ключ не покидает этот контейнер.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      # Модель OpenRouter по умолчанию; поле модели в интерфейсе переопределяет её.
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-z-ai/glm-5.3-flash}
+      # Адрес сервера Ollama для суммаризации встреч (задаётся в .env).
+      # По умолчанию Ollama на хост-машине: внутри контейнера localhost —
+      # это сам контейнер, поэтому используется host.docker.internal.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      # Модель не задаётся переменной: web сам опрашивает Ollama
+      # (/api/ps, затем /api/tags) и даёт выбор пользователю в интерфейсе.
+    extra_hosts:
+      # Чтобы host.docker.internal работал и на Linux-хостах.
+      - "host.docker.internal:host-gateway"
     depends_on:
       - gigaam-api
     restart: unless-stopped

@@ -718,7 +718,7 @@ function resetSummaryUI(emptyText) {
   const empty = $('summary-empty');
   empty.classList.remove('hidden');
   empty.textContent = emptyText ||
-    'После завершения диаризации расшифровка автоматически уйдёт в OpenRouter, и здесь появится резюме встречи.';
+    'После завершения диаризации расшифровка автоматически уйдёт в Ollama, и здесь появится резюме встречи.';
   $('summary-rerun').disabled = !state.result;
 }
 
@@ -1064,7 +1064,7 @@ function updatePromptNote() {
   const current = ($('system-prompt').value || '').trim();
   const isDefault = current === DEFAULT_SYSTEM_PROMPT.trim();
   note.textContent = isDefault
-    ? 'промт по умолчанию · суммаризация выполняется через OpenRouter после завершения диаризации'
+    ? 'промт по умолчанию · суммаризация выполняется через локальный Ollama после завершения диаризации'
     : 'промт изменён и сохранён в этом браузере';
 }
 
@@ -1091,6 +1091,20 @@ function initLlmPanel() {
     persist();
   });
   updatePromptNote();
+  // Подсказка моделей из Ollama (GET /api/llm/models); при недоступном
+  // Ollama просто оставляем поле пустым — ошибку не показываем.
+  api('/llm/models')
+    .then((data) => {
+      const list = $('llm-model-list');
+      if (!list || !Array.isArray(data.models)) return;
+      list.innerHTML = '';
+      for (const name of data.models) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        list.appendChild(opt);
+      }
+    })
+    .catch(() => { /* Ollama недоступна — без подсказок */ });
 }
 
 async function onSummaryCopy() {

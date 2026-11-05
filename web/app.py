@@ -27,10 +27,13 @@ Audio.crop, и задача падает с ошибкой вида
     API_BASE_URL  адрес API-сервера (по умолчанию http://localhost:8000,
                   в контейнере — http://gigaam-api:8000)
     WEBUI_PORT    порт веб-интерфейса  (по умолчанию 8001)
-    OPENROUTER_API_KEY   ключ OpenRouter для суммаризации встреч (без него
-                  POST /api/summarize возвращает 503)
-    OPENROUTER_MODEL     модель OpenRouter по умолчанию
-                  (по умолчанию z-ai/glm-5.3-flash)
+    OLLAMA_URL  адрес сервера Ollama для суммаризации встреч (по
+                  умолчанию http://host.docker.internal:11434 — Ollama
+                  на хост-машине; внутри контейнера localhost — это
+                  сам контейнер, а не хост). Модель не задаётся
+                  переменной окружения: web сам опрашивает Ollama
+                  (/api/ps, затем /api/tags) и даёт пользователю выбор
+                  в интерфейсе
 """
 
 import json
@@ -70,13 +73,15 @@ _FORWARD_QUERY = {
 }
 
 # ---------------------------------------------------------------------------
-# OpenRouter: суммаризация встреч через LLM
+# Ollama: суммаризация встреч через локальную LLM
 # ---------------------------------------------------------------------------
-_OPENROUTER_HOST = "openrouter.ai"
-_OPENROUTER_PATH = "/api/v1/chat/completions"
-_OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-_OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.3-flash")
+# Адрес сервера Ollama. Внутри контейнера localhost — это сам контейнер,
+# поэтому по умолчанию используется host.docker.internal (Ollama на хосте;
+# в docker-compose.yml добавлен extra_hosts: host-gateway, чтобы это
+# работало и на Linux-хостах).
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
 _SUMMARIZE_TIMEOUT = 300.0  # максимум на один запрос к LLM, сек
+_LLM_LIST_TIMEOUT = 10.0  # максимум на служебный запрос (список моделей), сек
 
 app = FastAPI(title="GigaAM Web UI", version="1.0.0", docs_url=None, redoc_url=None)
 
@@ -333,7 +338,7 @@ def proxy_delete_job(job_id: str) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# Суммаризация встречи через OpenRouter
+# Суммаризация встречи через локальный Ollama
 # ---------------------------------------------------------------------------
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — ассистент, который суммаризирует расшифровки встреч (митингов) "
@@ -405,48 +410,104 @@ def _build_llm_user_content(req: SummarizeRequest) -> str:
     return "\n".join(lines)
 
 
+def _ollama_model_names(path: str) -> List[str]:
+    """Имена моделей из JSON-ответа Ollama (GET /api/tags или /api/ps).
+
+    Оба эндпоинта отвечают {"models": [{"name": ...}, ...]}; при любой
+    ошибке транспорта/разбора возвращаем пустой список, а не исключение.
+    """
+    url = urlparse(OLLAMA_URL)
+    conn_cls = HTTPSConnection if url.scheme == "https" else HTTPConnection
+    try:
+        conn = conn_cls(url.netloc, timeout=_LLM_LIST_TIMEOUT)
+        try:
+            conn.request("GET", url.path.rstrip("/") + path)
+            resp = conn.getresponse()
+            raw = resp.read()
+        finally:
+            conn.close()
+    except (OSError, TimeoutError):
+        return []
+    try:
+        data = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return []
+    names: List[str] = []
+    if isinstance(data, dict):
+        for item in data.get("models") or []:
+            if isinstance(item, dict) and item.get("name"):
+                names.append(str(item["name"]))
+    return names
+
+
+def _resolve_model(requested: str) -> Optional[str]:
+    """Выбор модели Ollama для суммаризации.
+
+    Порядок: явная модель из запроса интерфейса → первая загруженная
+    сейчас в память (GET /api/ps) → первая установленная (GET /api/tags).
+    None означает, что пользователь модель не указал, а Ollama не
+    отдала ни одной доступной модели (недоступна или список пуст).
+    """
+    if requested:
+        return requested
+    loaded = _ollama_model_names("/api/ps")
+    if loaded:
+        return loaded[0]
+    installed = _ollama_model_names("/api/tags")
+    if installed:
+        return installed[0]
+    return None
+
+
 @app.post("/api/summarize")
 def summarize(req: SummarizeRequest) -> Response:
-    """Отправляет расшифровку в OpenRouter и возвращает резюме встречи.
+    """Отправляет расшифровку в локальный Ollama и возвращает резюме встречи.
 
-    Ключ OPENROUTER_API_KEY живёт только на сервере (в окружении
-    web-контейнера) и никогда не передаётся в браузер.
+    Запрос идёт браузер -> web-контейнер -> Ollama: адрес Ollama и его
+    модели не раскрываются браузеру, наружу отдаётся только резюме.
+    Модель берётся из запроса; если поле пустое — web сам опрашивает
+    Ollama (/api/ps, затем /api/tags) и берёт первую доступную модель,
+    а при их отсутствии возвращает 502 с подсказкой.
     """
-    if not _OPENROUTER_API_KEY:
+    system_prompt = (req.system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
+    model = _resolve_model((req.model or "").strip())
+    if not model:
         raise HTTPException(
-            status_code=503,
+            status_code=502,
             detail=(
-                "OPENROUTER_API_KEY не задан: добавьте ключ в .env "
-                "(строка OPENROUTER_API_KEY=...) и пересоздайте web-контейнер"
+                "Не удалось определить модель Ollama: сервер недоступен "
+                f"({OLLAMA_URL}) или в нём нет установленных моделей. "
+                "Выполните «ollama pull <модель>» или выберите модель в интерфейсе."
             ),
         )
-    system_prompt = (req.system_prompt or "").strip() or DEFAULT_SYSTEM_PROMPT
-    model = (req.model or "").strip() or _OPENROUTER_MODEL
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": _build_llm_user_content(req)},
         ],
+        "stream": False,
     }
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body)),
-        "Authorization": f"Bearer {_OPENROUTER_API_KEY}",
-        "X-Title": "GigaAM Web UI",
-    }
+    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+    url = urlparse(OLLAMA_URL)
+    conn_cls = HTTPSConnection if url.scheme == "https" else HTTPConnection
     try:
-        conn = HTTPSConnection(_OPENROUTER_HOST, timeout=_SUMMARIZE_TIMEOUT)
+        conn = conn_cls(url.netloc, timeout=_SUMMARIZE_TIMEOUT)
         try:
-            conn.request("POST", _OPENROUTER_PATH, body=body, headers=headers)
+            conn.request("POST", url.path.rstrip("/") + "/api/chat", body=body, headers=headers)
             resp = conn.getresponse()
             raw = resp.read()
         finally:
             conn.close()
     except (OSError, TimeoutError) as exc:
         raise HTTPException(
-            status_code=502, detail=f"OpenRouter недоступен: {exc}"
+            status_code=502,
+            detail=(
+                f"Ollama ({OLLAMA_URL}) недоступна: {exc}. "
+                "Проверьте, что Ollama запущена и адрес указан верно "
+                "(переменная OLLAMA_URL)."
+            ),
         ) from exc
 
     try:
@@ -455,38 +516,53 @@ def summarize(req: SummarizeRequest) -> Response:
         data = None
 
     if resp.status != 200:
-        # Прозрачно пробрасываем статус и текст ошибки OpenRouter.
+        # Прозрачно пробрасываем ошибку Ollama (например, «model not found»).
         detail = ""
         if isinstance(data, dict):
-            err = data.get("error")
-            if isinstance(err, dict):
-                detail = str(err.get("message") or err)
-            elif err is not None:
-                detail = str(err)
+            detail = str(data.get("error") or "")
         if not detail:
             detail = raw.decode("utf-8", "replace")[:300]
         raise HTTPException(
             status_code=resp.status,
-            detail=f"OpenRouter вернул {resp.status}: {detail}",
+            detail=f"Ollama вернула {resp.status}: {detail}",
         )
     if not isinstance(data, dict):
-        raise HTTPException(status_code=502, detail="OpenRouter вернул не-JSON ответ")
-    choices = data.get("choices") or []
-    content = ""
-    if choices and isinstance(choices[0], dict):
-        message = choices[0].get("message") or {}
-        content = str(message.get("content") or "")
+        raise HTTPException(status_code=502, detail="Ollama вернула не-JSON ответ")
+    message = data.get("message") or {}
+    content = str(message.get("content") or "") if isinstance(message, dict) else ""
     if not content.strip():
-        raise HTTPException(status_code=502, detail="OpenRouter вернул пустой ответ модели")
+        raise HTTPException(status_code=502, detail="Ollama вернула пустой ответ модели")
+    prompt_tokens = data.get("prompt_eval_count")
+    completion_tokens = data.get("eval_count")
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": (
+            prompt_tokens + completion_tokens
+            if isinstance(prompt_tokens, int) and isinstance(completion_tokens, int)
+            else None
+        ),
+        "total_duration_ms": data.get("total_duration"),
+    }
     return Response(
         content=json.dumps(
-            {
-                "summary": content,
-                "model": data.get("model") or model,
-                "usage": data.get("usage"),
-            },
+            {"summary": content, "model": data.get("model") or model, "usage": usage},
             ensure_ascii=False,
         ),
+        media_type="application/json; charset=utf-8",
+    )
+
+
+@app.get("/api/llm/models")
+def llm_models() -> Response:
+    """Список моделей, установленных в Ollama (GET /api/tags).
+
+    Используется интерфейсом для подсказки в поле модели; при недоступном
+    Ollama возвращает пустой список (ошибку не бросаем).
+    """
+    names = _ollama_model_names("/api/tags")
+    return Response(
+        content=json.dumps({"models": names}, ensure_ascii=False),
         media_type="application/json; charset=utf-8",
     )
 
