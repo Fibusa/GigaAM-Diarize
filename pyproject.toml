@@ -7,7 +7,6 @@ name = "gigaam"
 version = "0.2.0"
 description = "GigaAM: A package for audio modeling and ASR."
 readme = "README.md"
-license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "GigaChat Team" },

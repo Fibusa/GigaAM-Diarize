@@ -20,7 +20,7 @@ _DIARIZATION_PIPELINE = None
 
 # Community-1 is the current flagship diarization pipeline of pyannote.audio 4.x
 # (powerset segmentation + VBx clustering, PLDA re-scoring). It is a gated model:
-# its CC-BY-4.0 conditions must be accepted on the Hugging Face model page for
+# its usage conditions must be accepted on the Hugging Face model page for
 # the HF_TOKEN user. Fallback keeps the service usable with the older 3.1 model.
 DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 FALLBACK_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"

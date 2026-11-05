@@ -22,7 +22,7 @@
 - Docker Compose v2.
 - Токен Hugging Face с доступом к гейтед-моделям pyannote: `pyannote/speaker-diarization-community-1`
   (модель диаризации по умолчанию) и `pyannote/segmentation-3.0` (VAD). На страницах
-  моделей нужно принять условия лицензии (для community-1 — CC-BY-4.0). Получить
+  моделей нужно принять условия их использования. Получить
   токен: https://huggingface.co/settings/tokens
 - Если community-1 недоступна (условия не приняты, нет токена или кэша), сервис
   автоматически переключается на `pyannote/speaker-diarization-3.1` с предупреждением
@@ -98,11 +98,6 @@ powerset-сегментация, кластеризация VBx и PLDA-реск
 (у агломеративной кластеризации 3.1 — `min_cluster_size` и `threshold`), а у
 сегментации — только `min_duration_off`. Параметры из конфига модели уже
 настроены авторами pyannote, поэтому по умолчанию ничего переопределять не нужно.
-
-Лицензии: код GigaAM — MIT (Sber, https://github.com/salute-developers/GigaAM),
-код пайплайнов pyannote — MIT, а веса модели `speaker-diarization-community-1`
-распространяются по CC-BY-4.0 (у 3.1 — MIT). При использовании результатов
-и распространении проекта указывайте авторство pyannote.
 
 ## Веб-интерфейс
 
